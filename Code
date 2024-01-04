@@ -1,0 +1,498 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <math.h>
+#include <string.h>
+#include <stdbool.h>
+#include "inc/hw_ints.h"
+#include "inc/hw_memmap.h"
+#include "inc/hw_types.h"
+#include "inc/hw_timer.h"
+
+#include "driverlib/interrupt.h"
+#include "driverlib/uart.h"
+#include "driverlib/systick.h"
+#include "driverlib/eeprom.h"
+#include "utils/uartstdio.h"
+#include "modbus_rtu.h"
+#include "driverlib/debug.h"
+#include "driverlib/fpu.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "driverlib/pin_map.h"
+#include "driverlib/timer.h"
+#include "inc/tm4c123gh6pm.h"
+#include "driverlib/adc.h" // Definitions for ADC API of DriverLib.
+
+
+
+#ifdef DEBUG
+void
+__error__(char *pcFilename, unsigned long ulLine)
+{
+}
+#endif
+#define LED 0x02
+#define MODBUS_IDLE 0u
+#define MODBUS_Rx_DATA_COLLECTION MODBUS_IDLE + 1
+#define MODBUS_Rx_DATA_RECEIVED MODBUS_Rx_DATA_COLLECTION + 1
+#define FIRST_POWERUP_EEPROM_ADDRESS 0
+#define COIL_BEGIN_EEPROM_ADDRESS FIRST_POWERUP_EEPROM_ADDRESS + 4
+#define HOLDING_REGISTER_BEGIN_EEPROM_ADDRESS COIL_BEGIN_EEPROM_ADDRESS + 52
+#define DISCRETE_INPUT_BEGIN_EEPROM_ADDRESS HOLDING_REGISTER_BEGIN_EEPROM_ADDRESS + 532
+#define INPUT_REGISTER_BEGIN_EEPROM_ADDRESS DISCRETE_INPUT_BEGIN_EEPROM_ADDRESS + 52
+#define COIL 0x00
+#define DISCRETE_INPUT COIL + 1
+#define INPUT_REGISTER DISCRETE_INPUT + 1
+#define HOLDING_REGISTER INPUT_REGISTER + 1
+#define UART_MODULE_BASE UART0_BASE
+#define MAX_MULTIPLE_REGISTERS 128
+int fcount=0;
+uint16_t num_coils_received;
+uint32_t written_multiple_registers_values[MAX_MULTIPLE_REGISTERS];
+uint32_t written_multiple_registers_values1[MAX_MULTIPLE_REGISTERS];
+uint32_t written_multiple_registers_values2[MAX_MULTIPLE_REGISTERS];
+
+// Variable Declaration - Start -
+uint8_t byte_count = 0;
+uint8_t modbus_received_data[64];
+uint8_t fsm = MODBUS_IDLE;
+uint8_t uart_data_rx[150];
+uint32_t  SysTick_value = 0;
+char rx_character;
+uint8_t fsm_uart = MODBUS_IDLE;
+char received_character = '\0';
+char received_string[20];
+uint32_t f=0;
+uint32_t count=0;
+int k=0;
+uint32_t pulse_time_1=0;
+int attempt=0;
+int w=0;
+
+int freq1[10]={5000000, 2500000, 1200000,500000};
+int freq2[10]={5000000, 2500000, 1200000,500000};
+int freq3[10]={5000000, 2500000, 1200000,500000};
+int freq4[10]={5000000, 2500000, 1200000,500000};
+int freq5[10]={5000000, 2500000, 1200000,500000};
+
+  /* Configure
+    PC4 Timer 0 WT0CCP0
+    PC6 Timer 1 WT1CCP0
+    PD0 Timer 2 WT2CCP0
+    PD2 Timer 3 WT3CCP0
+    PD6 Timer 5 WT5CCP0
+    PC5 Timer 0 WT0CCP1   */
+void UARTSend(uint8_t *pucBuffer, uint8_t ulCount);
+void systick_int(void)
+{//UARTprintf("sys tick.\n");
+    SysTick_value++;
+
+    if(SysTick_value >= 4u)
+    {
+        SysTick_value = 0;
+        fsm =  MODBUS_Rx_DATA_RECEIVED;
+        SysTickDisable();
+
+    }
+
+
+}
+
+void UARTIntHandler(void)
+{
+    //UARTprintf("UART int.\n");
+    unsigned long ulStatus;
+    ulStatus = UARTIntStatus(UART0_BASE, true);
+    UARTIntClear(UART0_BASE, ulStatus);
+    if(UARTCharsAvail(UART0_BASE))
+    {
+        rx_character =  UARTCharGetNonBlocking(UART0_BASE);
+        SysTickEnable();
+        switch(fsm)
+        {
+            case MODBUS_IDLE:
+            {
+                uart_data_rx[0] = rx_character;
+                if(uart_data_rx[0] == MODBUS_SLAVE_ADDRESS)
+                {
+                    fsm = MODBUS_Rx_DATA_COLLECTION;
+                    SysTick_value = 0;
+                    SysTickEnable();
+                    break;
+                }
+                else
+                {
+                    break;
+                }
+            }
+            case MODBUS_Rx_DATA_COLLECTION:
+            {
+                byte_count++;
+                uart_data_rx[byte_count] = rx_character;
+                SysTick_value = 0;
+                SysTickEnable();
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+void UARTSend(uint8_t *pucBuffer, uint8_t ulCount)
+{
+    //UARTprintf("UART send.\n");
+    while(ulCount)
+    {
+        UARTCharPut(UART0_BASE, *pucBuffer);
+        pucBuffer++;
+        ulCount--;
+    }
+  //  UARTprintf("Hello, UART with Interrupts!\n");
+}
+
+void update_eeprom(uint8_t parameter)
+{
+    //UARTprintf("update_eeprom.\n");
+    uint8_t i;
+    switch(parameter)
+    {
+        case COIL:
+            for(i = 0; i < COIL_BYTES; i++)
+            {
+                modbus_coil_value[i] = modbus_response_coil_temp[i];
+                EEPROMProgram((unsigned long *)&modbus_coil_value[i], COIL_BEGIN_EEPROM_ADDRESS + (4*i), sizeof(uint8_t));
+            }
+            break;
+        case DISCRETE_INPUT:
+            for(i = 0; i < DISCRETE_INPUT_BYTES; i++)
+            {
+                modbus_discrete_input_value[i] = modbus_response_discrete_input_temp[i];
+                EEPROMProgram((unsigned long *)&modbus_discrete_input_value[i], DISCRETE_INPUT_BEGIN_EEPROM_ADDRESS + (4*i), sizeof(uint8_t));
+            }
+            break;
+        case HOLDING_REGISTER:
+
+            for(i = 0; i < NUMBER_OF_HOLDING_REGISTERS; i++)
+            {
+                modbus_holding_registers_value[i] = modbus_response_holding_registers_temp[i];
+                modbus_holding_registers_value_H[i] = (uint8_t)(modbus_holding_registers_value[i] >> 8);
+                modbus_holding_registers_value_L[i] = (uint8_t)(modbus_holding_registers_value[i] & 0xFF);
+                EEPROMProgram((unsigned long *)&modbus_holding_registers_value_H[i], HOLDING_REGISTER_BEGIN_EEPROM_ADDRESS + (8*i), sizeof(uint8_t));
+                EEPROMProgram((unsigned long *)&modbus_holding_registers_value_L[i], HOLDING_REGISTER_BEGIN_EEPROM_ADDRESS + (8*i) + 4, sizeof(uint8_t));
+            }
+            break;
+        case INPUT_REGISTER:
+            for(i = 0; i < NUMBER_OF_INPUT_REGISTERS; i++)
+            {
+                modbus_input_registers_value[i] = modbus_response_input_registers_temp[i];
+                modbus_input_registers_value_H[i] = (uint8_t)(modbus_input_registers_value[i] >> 8);
+                modbus_input_registers_value_L[i] = (uint8_t)(modbus_input_registers_value[i] & 0xFF);
+                EEPROMProgram((unsigned long *)&modbus_input_registers_value_H[i], INPUT_REGISTER_BEGIN_EEPROM_ADDRESS + (8*i), sizeof(uint8_t));
+                EEPROMProgram((unsigned long *)&modbus_input_registers_value_L[i], INPUT_REGISTER_BEGIN_EEPROM_ADDRESS + (8*i) + 4, sizeof(uint8_t));
+            }
+            break;
+        default:
+            break;
+    }
+}
+void read_eeprom(void)
+{
+    //UARTprintf("read_eeprom.\n");
+    uint8_t i;
+    for(i = 0; i < COIL_BYTES; i++)
+    {
+        EEPROMRead((unsigned long *)&modbus_coil_value[i], COIL_BEGIN_EEPROM_ADDRESS + (4*i), sizeof(uint8_t));
+        modbus_response_coil_temp[i] = modbus_coil_value[i];
+    }
+    for(i = 0; i < DISCRETE_INPUT_BYTES; i++)
+    {
+        EEPROMRead((unsigned long *)&modbus_discrete_input_value[i], DISCRETE_INPUT_BEGIN_EEPROM_ADDRESS + (4*i), sizeof(uint8_t));
+        modbus_response_discrete_input_temp[i] = modbus_discrete_input_value[i];
+    }
+    for(i = 0; i < NUMBER_OF_HOLDING_REGISTERS; i++)
+    {
+        modbus_holding_registers_value_H[i] = 0;
+        modbus_holding_registers_value_L[i] = 0;
+        EEPROMRead((unsigned long *)&modbus_holding_registers_value_H[i], HOLDING_REGISTER_BEGIN_EEPROM_ADDRESS + (8*i), sizeof(uint8_t));
+        EEPROMRead((unsigned long *)&modbus_holding_registers_value_L[i], HOLDING_REGISTER_BEGIN_EEPROM_ADDRESS + (8*i) + 4, sizeof(uint8_t));
+        modbus_holding_registers_value[i] = ((uint16_t)((uint16_t)modbus_holding_registers_value_H[i]) << 8) | ((uint16_t)((uint16_t)modbus_holding_registers_value_L[i]) & 0xFF);
+        modbus_response_holding_registers_temp[i] = modbus_holding_registers_value[i];
+    }
+
+    for(i = 0; i < NUMBER_OF_INPUT_REGISTERS; i++)
+    {
+        EEPROMRead((unsigned long *)&modbus_input_registers_value_H[i], INPUT_REGISTER_BEGIN_EEPROM_ADDRESS + (8*i), sizeof(uint8_t));
+        EEPROMRead((unsigned long *)&modbus_input_registers_value_L[i], INPUT_REGISTER_BEGIN_EEPROM_ADDRESS + (8*i) + 4, sizeof(uint8_t));
+        modbus_input_registers_value[i] = ((uint16_t)((uint16_t)modbus_input_registers_value_H[i]) << 8) | ((uint16_t)((uint16_t)modbus_input_registers_value_L[i]) & 0xFF);
+        modbus_response_input_registers_temp[i] = modbus_input_registers_value[i];
+    }
+}
+
+void TIMER_Initialize(int i)
+{
+// Enables timer 1
+
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER3);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_WTIMER0);
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_WTIMER1);
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_WTIMER2);
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_WTIMER5);
+
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_TIMER3))
+    {
+
+    }
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
+       SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOC);
+       SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOB))
+    {
+
+    }
+    // PB5 pin configured with timer 1
+        GPIOPinConfigure(GPIO_PB2_T3CCP0);
+// Timer type set
+    GPIOPinTypeTimer(GPIO_PORTB_BASE, GPIO_PIN_2);
+
+        GPIOPinConfigure(GPIO_PC4_WT0CCP0);
+        GPIOPinTypeTimer(GPIO_PORTC_BASE, GPIO_PIN_4);
+        GPIOPinConfigure(GPIO_PC6_WT1CCP0);
+        GPIOPinTypeTimer(GPIO_PORTC_BASE, GPIO_PIN_6);
+        GPIOPinConfigure(GPIO_PD0_WT2CCP0);
+        GPIOPinTypeTimer(GPIO_PORTD_BASE, GPIO_PIN_0);
+        GPIOPinConfigure(GPIO_PD6_WT5CCP0);
+        GPIOPinTypeTimer(GPIO_PORTD_BASE, GPIO_PIN_6);
+        GPIOPinConfigure(GPIO_PC5_WT0CCP1);
+        GPIOPinTypeTimer(GPIO_PORTC_BASE, GPIO_PIN_5);
+
+// Configure timer to edge time capture
+    TimerConfigure(TIMER3_BASE, TIMER_CFG_SPLIT_PAIR | TIMER_CFG_A_CAP_COUNT_UP);
+       TimerConfigure(TIMER0_BASE, TIMER_CFG_A_PWM);
+       TimerConfigure(WTIMER0_BASE, TIMER_CFG_SPLIT_PAIR | TIMER_CFG_A_PWM|TIMER_CFG_B_PWM);
+       TimerConfigure(WTIMER1_BASE, TIMER_CFG_SPLIT_PAIR | TIMER_CFG_A_PWM);
+       TimerConfigure(WTIMER2_BASE, TIMER_CFG_SPLIT_PAIR | TIMER_CFG_A_PWM);
+       TimerConfigure(WTIMER5_BASE, TIMER_CFG_SPLIT_PAIR | TIMER_CFG_A_PWM);
+// Event set to both pulse edges
+    TimerControlEvent(TIMER3_BASE, TIMER_A, TIMER_EVENT_POS_EDGE);
+// Enables the timers
+    // Set the load value for the PWM period..
+
+       TimerLoadSet(TIMER0_BASE, TIMER_A, 0xFFFFFFFF);
+      UARTprintf("%d",written_multiple_registers_values[i]);
+       TimerLoadSet(WTIMER0_BASE, TIMER_A, written_multiple_registers_values[i]);
+       TimerLoadSet(WTIMER1_BASE, TIMER_A, written_multiple_registers_values[i]/2);
+       TimerLoadSet(WTIMER2_BASE, TIMER_A, 5000000);
+       TimerLoadSet(WTIMER5_BASE, TIMER_A,  2818);
+       TimerLoadSet(WTIMER0_BASE, TIMER_B,  2818);
+       // Set the match value for 50% duty cycle (PWM_PERIOD / 2)
+       TimerMatchSet(WTIMER0_BASE, TIMER_A, (written_multiple_registers_values[i])/2);
+       TimerMatchSet(WTIMER1_BASE, TIMER_A, ((written_multiple_registers_values[i])/2)/2);
+       TimerMatchSet(WTIMER2_BASE, TIMER_A, 5000000);
+       TimerMatchSet(WTIMER5_BASE, TIMER_A, 1409);
+       TimerMatchSet(WTIMER0_BASE, TIMER_B, 1409);
+       // Enable Wide Timer 0 (WTIMER0) for Timer A
+       TimerEnable(WTIMER0_BASE, TIMER_A);
+       TimerEnable(WTIMER1_BASE, TIMER_A);
+       TimerEnable(WTIMER2_BASE, TIMER_A);
+       TimerEnable(WTIMER5_BASE, TIMER_A);
+       TimerEnable(WTIMER0_BASE, TIMER_B);
+       TimerEnable(TIMER0_BASE, TIMER_A);
+
+       TimerSynchronize(TIMER0_BASE,WTIMER_0A_SYNC|WTIMER_1A_SYNC|WTIMER_2A_SYNC||WTIMER_5A_SYNC|WTIMER_0B_SYNC);
+           TimerSynchronize(TIMER0_BASE,0);
+
+    TimerControlStall(TIMER3_BASE, TIMER_A, true);
+
+}
+
+
+
+void modbus()
+{
+
+    if(fsm == MODBUS_Rx_DATA_RECEIVED)
+                        {
+                            uint8_t i;
+                            for(i = 0; i <= byte_count; i++)
+                            {
+                                modbus_received_data[i] = uart_data_rx[i];
+                            }
+                            if(modbus_received_data[0] == MODBUS_SLAVE_ADDRESS)
+                            {
+                                switch(modbus_received_data[1])
+                                {
+                                    case 0x01:
+                                        query_response_read_coil(&modbus_received_data[0], byte_count + 1);
+                                        UARTSend(&modbus_response_read_coil[0], modbus_response_data_length);
+                                        break;
+                                    case 0x02:
+                                        query_response_read_discrete_input(&modbus_received_data[0], byte_count + 1);
+                                        UARTSend(&modbus_response_read_discrete_input[0], modbus_response_data_length);
+                                        break;
+                                    case 0x03 :
+                                        query_response_read_holding_registers(&modbus_received_data[0], byte_count + 1);
+                                        UARTSend(&modbus_response_read_holding_registers[0], modbus_response_data_length);
+                                        break;
+                                    case 0x04 :
+                                        query_response_read_input_registers(&modbus_received_data[0], byte_count + 1);
+                                        UARTSend(&modbus_response_read_input_registers[0], modbus_response_data_length);
+                                        break;
+                                    case 0x05 :
+                                        query_response_force_single_coil(&modbus_received_data[0], byte_count + 1);
+                                        UARTSend(&modbus_response_force_single_coil[0], modbus_response_data_length);
+                                        update_eeprom(COIL);
+                                        break;
+                                    case 0x06 :
+                                        query_response_preset_single_register(&modbus_received_data[0], byte_count + 1);
+                                        UARTSend(&modbus_response_preset_single_register[0], modbus_response_data_length);
+                                        update_eeprom(HOLDING_REGISTER);
+                                        break;
+                                    case 0x0F :
+                                        query_response_force_multiple_coils(&modbus_received_data[0], byte_count + 1);
+                                        UARTSend(&modbus_response_force_multiple_coils[0], modbus_response_data_length);
+                                        update_eeprom(COIL);
+                                        break;
+                                    case 0x10 :
+                                        query_response_preset_multiple_registers(&modbus_received_data[0], byte_count + 1);
+                                            UARTSend(&modbus_response_preset_multiple_registers[0], modbus_response_data_length);
+
+                                            num_coils_received = (uint16_t)(modbus_received_data[4] << 8 | modbus_received_data[5]);
+                                            //UARTprintf("%d",(int)num_coils_received);
+                                            for (i = 0; i < num_coils_received/2; i++) {
+                                                written_multiple_registers_values1[i] = (uint32_t)(modbus_received_data[7 + i * 4] << 8 | modbus_received_data[8 + i * 4]);
+                                                //UARTprintf("%d",written_multiple_registers_values1[i] );
+                                                written_multiple_registers_values2[i] = (uint32_t)(modbus_received_data[9 + i * 4] << 8 | modbus_received_data[10 + i * 4]);
+                                                written_multiple_registers_values[i] = (uint32_t)((written_multiple_registers_values2[i] *1000) + written_multiple_registers_values1[i]);
+                                               //written_multiple_registers_values[i] = (uint32_t)(modbus_received_data[7 + i * 2] << 24 |modbus_received_data[8 + i * 2] << 16 |  modbus_received_data[9 + i * 2]<<8| modbus_received_data[10 + i * 2]);
+                                                //written_multiple_registers_values[i] = (uint32_t)(modbus_received_data[7 + i * 2] << 8 );
+
+                                                // UARTprintf("%d", i);
+
+                                            }
+                                           // written_multiple_registers_values[0]= (written_multiple_registers_values[0]<<16) | written_multiple_registers_values[1];
+                                            update_eeprom(HOLDING_REGISTER);
+                                        TIMER_Initialize(0);
+
+                                        //for (i = 0; i < MAX_MULTIPLE_REGISTERS; i++)
+
+                                        attempt=1;
+                                        break;
+                                    default :
+                                        break;
+                                }
+
+                            }
+
+
+                            fsm = MODBUS_IDLE;
+                            byte_count = 0;
+
+
+                        }
+
+}
+
+int main(void) {
+    // Set the system clock to 50 MHz
+
+    FPUEnable();
+    FPULazyStackingEnable();
+    SysCtlClockSet(SYSCTL_SYSDIV_4 | SYSCTL_USE_PLL | SYSCTL_OSC_MAIN | SYSCTL_XTAL_16MHZ);
+
+    SYSCTL_RCGC2_R = SYSCTL_RCGC2_GPIOF;
+        uint32_t ulLoop = SYSCTL_RCGC2_R;
+        GPIO_PORTF_DIR_R = LED;
+        GPIO_PORTF_DEN_R = LED;
+        GPIO_PORTF_DATA_R &= 0xFD;
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+        IntMasterEnable();
+        GPIOPinConfigure(GPIO_PA0_U0RX);
+        GPIOPinConfigure(GPIO_PA1_U0TX);
+        GPIOPinTypeUART(GPIO_PORTA_BASE, GPIO_PIN_0 | GPIO_PIN_1);
+
+        UARTStdioConfig(0, 115200, SysCtlClockGet());
+
+        UARTIntRegister(UART_MODULE_BASE, UARTIntHandler);
+        UARTIntEnable(UART0_BASE, UART_INT_RX | UART_INT_RT);
+        IntEnable(INT_UART0);
+           SysTickIntRegister(&systick_int);
+           SysTickPeriodSet(SysCtlClockGet()/100);
+
+
+           SysCtlPeripheralEnable(SYSCTL_PERIPH_EEPROM0);
+           EEPROMInit();
+           uint8_t EEPROM_PowerUp_flag;
+
+           EEPROMRead((unsigned long *)&EEPROM_PowerUp_flag, FIRST_POWERUP_EEPROM_ADDRESS, sizeof(uint8_t));
+              if(EEPROM_PowerUp_flag == 0xFF)
+              {
+                  GPIO_PORTF_DATA_R ^= LED;
+                  EEPROMInit();
+                  EEPROM_PowerUp_flag = 0x00;
+                  EEPROMProgram((unsigned long *)&EEPROM_PowerUp_flag, FIRST_POWERUP_EEPROM_ADDRESS, sizeof(uint8_t));
+              }
+              else
+                  GPIO_PORTF_DATA_R &= 0xF1;
+              read_eeprom();
+
+
+
+
+              //UARTprintf("Debug: Entered MODBUS_IDLE state.\n");
+            //  displayStoredValues();
+             // UARTprintf("Debug: Entered MODBUS_IDLE state.\n");
+
+             // TIMER_Initialize(i);
+
+              while(1)
+                 {
+
+                     modbus();
+                       if(attempt==1)
+                         for (w = 0; w < num_coils_received/2;)
+
+                     {
+
+                                         f=50000000/written_multiple_registers_values[w];
+                                           count=f/10;// 2 seconds
+                                          //
+                                          // UARTprintf("%u",count);
+                               pulse_time_1 = TimerValueGet(TIMER3_BASE, TIMER_A);
+                            //UARTprintf("%d",written_multiple_registers_values[w]);
+                                  if (pulse_time_1>=count)
+                                   {
+                                      //UARTprintf("%d",written_multiple_registers_values[w]);
+                                      //UARTprintf("%d",count);
+                                   //UARTprintf("%d",w);
+                                             fcount+=pulse_time_1;
+                                             UARTprintf("%d",pulse_time_1);
+                                       w++;
+                                       HWREG(TIMER3_BASE + TIMER_O_TAV) = 0;
+                                                       pulse_time_1 =0;
+                                    if(written_multiple_registers_values[w]!=0)
+                                       TIMER_Initialize(w);
+                                    else
+                                    {
+                                        written_multiple_registers_values[w]=0;
+                                    TIMER_Initialize(w);
+
+                                    UARTprintf("%d",fcount);
+                                    fcount=0;
+
+                                    }
+                                   }
+
+                                  TimerEnable(TIMER3_BASE, TIMER_A);
+                                 attempt=0;
+
+                     }
+
+             }
+}
+
