@@ -1,0 +1,2 @@
+# Synchronized-stepper-motor-running-interfaced-with-TIVA-C-Controller-through-modbus-protocol
+Synchronized stepper motor running, interfaced with TIVA-C(TM4c123GH6PM) Controller, through modbus protocol. Interfaces Stepper motor with TIVA-C Controller, through modbus protocol, Configured 32 bit timer and passes register value through modbus. Rotated one motor for 360 Degree and another motor for 180 Degree SYNCHRONOUSLY.
